@@ -556,7 +556,7 @@
           const shade = Math.max(0, Math.min(3, Math.round((1 - u) * 3)));
           const pax = ox + K1 * ((ax - cx) - (ay - cy)), pay = oy + K2 * ((ax - cx) + (ay - cy));
           const pbx = ox + K1 * ((bx - cx) - (by - cy)), pby = oy + K2 * ((bx - cx) + (by - cy));
-          if (shade !== lastShade) { ctx.fillStyle = pal.walls[shade]; ctx.strokeStyle = pal.walls[shade]; lastShade = shade; }
+          if (shade !== lastShade) { ctx.fillStyle = pal.walls[shade]; ctx.strokeStyle = pal.line; lastShade = shade; }
           ctx.beginPath();
           ctx.moveTo(pax, pay - h0); ctx.lineTo(pbx, pby - h0); ctx.lineTo(pbx, pby - h1); ctx.lineTo(pax, pay - h1);
           ctx.closePath();
@@ -577,7 +577,7 @@
               }
               ctx.stroke();
               ctx.lineWidth = 0.6;
-              ctx.strokeStyle = pal.walls[shade];
+              ctx.strokeStyle = pal.line;
             }
           }
         }
@@ -601,7 +601,7 @@
         ctx.fillStyle = pal.roof;
         ctx.fill('evenodd');
         if (detail) {
-          ctx.strokeStyle = pal.edge; ctx.lineWidth = 0.7; ctx.stroke();
+          ctx.strokeStyle = pal.edge; ctx.lineWidth = 1; ctx.stroke();
         } else {
           ctx.strokeStyle = pal.roof; ctx.lineWidth = 0.4; ctx.stroke();
         }
