@@ -7,6 +7,12 @@ illustrated landmarks, and simulated traffic. The robotaxi panel lets you reques
 simulated ride between landmarks or points on the map; it uses public OSRM road
 routes and is not a real transportation service. Routing requires network access.
 
+The close-up view extrudes OpenStreetMap building footprints from OpenFreeMap
+vector tiles. Heights are exaggerated for legibility and estimated when missing;
+the result is an illustration, not photographic or survey-accurate 3D imagery.
+Buildings load as you explore and disappear when zoomed out or offline. Use the
+home button to return to the full-region view.
+
 ## Run
 
 ```sh

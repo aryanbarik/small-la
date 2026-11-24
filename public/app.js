@@ -81,8 +81,9 @@ function resize() {
   const firstTime = !resize.done;
   minM = fitM() * 0.85;
   if (firstTime) {
-    tgt.m = cam.m = fitM() * (vw < 720 ? 2.2 : 1);
-    tgt.x = cam.x = vw < 720 ? CENTER_W[0] : (B.x0 + B.x1) / 2; tgt.y = cam.y = vw < 720 ? CENTER_W[1] : (B.y0 + B.y1) / 2;
+    // Start close enough to see the streets and buildings; the home button fits the whole region.
+    tgt.m = cam.m = 7;
+    tgt.x = cam.x = lon2x(-118.255); tgt.y = cam.y = lat2y(34.049);
     resize.done = true;
   }
   tgt.m = clamp(tgt.m, minM, MAX_M);
@@ -92,6 +93,10 @@ function screenToWorld(sx, sy, c = cam) {
   const a = (sx - vw / 2) / (0.7071 * c.m), b = (sy - vh / 2) / (0.35355 * c.m);
   return [c.x + (a + b) / 2, c.y + (b - a) / 2];
 }
+const buildingLayer = window.createBuildingLayer({
+  ctx, S, screenToWorld, getCamera: () => cam,
+  getViewport: () => ({ w: vw, h: vh }), bounds: B, worldSize: WS,
+});
 function clampCam(c) {
   c.x = clamp(c.x, B.x0, B.x1); c.y = clamp(c.y, B.y0, B.y1);
 }
@@ -1121,6 +1126,7 @@ function render(now, dt) {
   drawSlab();
   drawTiles();
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  buildingLayer.draw();
   const night = on.weatherfx ? sky.night : 0;
   const vs = clamp(0.95 * Math.sqrt(cam.m), 0.55, 2.4), ls = clamp(1.05 * Math.pow(cam.m, 0.6), 0.65, 3.4);
 
@@ -1138,7 +1144,10 @@ function render(now, dt) {
   // collect items for depth sorting
   const items = [];
   const push = (wx, wy, fn, hit) => { const [sx, sy] = S(wx, wy, 0); if (onScreen(sx, sy, 120)) items.push([sy, fn, hit && { x: sx, y: sy, ...hit }]); };
-  if (on.landmarks) for (const l of LANDMARKS) push(l.x, l.y, () => drawLandmark(l, ls, night), { r: 22 * ls, layer: 'landmarks', ent: l, dy: -10 * ls });
+  if (on.landmarks) for (const l of LANDMARKS) {
+    if (l.id === 'dtla' && buildingLayer.stats().drawn) continue;
+    push(l.x, l.y, () => drawLandmark(l, ls, night), { r: 22 * ls, layer: 'landmarks', ent: l, dy: -10 * ls });
+  }
   // decorative palms along coast & hills near landmarks
   const entHit = (layer, e, r) => ({ r, layer, ent: e, dy: -4 * vs });
   if (on.traffic) for (const c of cars) if (inSlab(c.x, c.y)) push(c.x, c.y, () => drawVehicle('traffic', c, vs, night), entHit('traffic', c, 8 * vs));
@@ -1254,7 +1263,6 @@ function drawLabels(vs, ls) {
     const [x, y] = S(l.x, l.y, 0); if (!onScreen(x, y)) continue;
     pill(l.name, x, y - 28 * ls, { size: 11, bold: true, bg: 'rgba(255,244,214,.95)', stroke: '#f4b73f' });
   }
-  const rich = cam.m > 2.6;
   const wantLabel = (layer, e) => (sel_ && sel_.ent === e) || (hov && hov.ent === e);
   for (const h of hits) {
     if (h.layer === 'landmarks') continue;
@@ -1266,7 +1274,7 @@ function drawLabels(vs, ls) {
     else if (h.layer === 'robotaxis') text = e.id;
     if (!text) continue;
     const force = wantLabel(h.layer, e);
-    if (!force && !(rich || h.layer === 'planes' && cam.m > 0.6 || h.layer === 'robotaxis' && cam.m > 0.7)) continue;
+    if (!force && !(h.layer === 'planes' && cam.m > 0.6 || h.layer === 'robotaxis' && cam.m > 0.7)) continue;
     const stroke = { buses: '#e4572e', planes: '#3b82f6', boats: '#0ea5b7', robotaxis: '#14b8a6' }[h.layer];
     pill(String(text), h.x, h.y - 10 * vs, { size: 10, force, stroke, bold: force });
   }
