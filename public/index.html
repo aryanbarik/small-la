@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#bfe3f2">
+<title>Small LA — a tiny live Los Angeles</title>
+<meta name="description" content="A miniature isometric Los Angeles with live buses, planes, boats, weather and rideable robotaxis.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23ff8a5b'/%3E%3Cpath d='M16 6l9 5v10l-9 5-9-5V11z' fill='%23fff3d6'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<canvas id="map" aria-label="Isometric map of Los Angeles" tabindex="0"></canvas>
+
+<header class="card brand" id="brand">
+  <div class="brand-row">
+    <div class="logo" aria-hidden="true"></div>
+    <div>
+      <h1>Small&nbsp;LA</h1>
+      <p class="tag">A tiny, living Los&nbsp;Angeles</p>
+    </div>
+  </div>
+  <div class="conn" id="conn" role="status"><span class="dot"></span><span id="connText">Connecting…</span></div>
+</header>
+
+<div class="banner" id="banner" hidden></div>
+
+<aside class="card panel layers" id="layersPanel">
+  <button class="panel-head" data-toggle="layersPanel" aria-expanded="true">
+    <span>Layers</span><span class="chev" aria-hidden="true"></span>
+  </button>
+  <div class="panel-body">
+    <ul id="layerList" class="layer-list"></ul>
+    <div class="legend">
+      <span class="badge live">LIVE</span> real feed
+      <span class="badge sim">SIM</span> simulated
+      <span class="badge art">ART</span> illustrated
+    </div>
+  </div>
+</aside>
+
+<section class="card panel weather" id="weatherPanel">
+  <button class="panel-head" data-toggle="weatherPanel" aria-expanded="true">
+    <span>Weather</span><span class="wx-mini" id="wxMini"></span><span class="chev" aria-hidden="true"></span>
+  </button>
+  <div class="panel-body" id="wxBody"></div>
+</section>
+
+<section class="card panel taxi" id="taxiPanel">
+  <button class="panel-head" data-toggle="taxiPanel" aria-expanded="true">
+    <span>Robotaxi <span class="badge sim">SIM</span></span><span class="chev" aria-hidden="true"></span>
+  </button>
+  <div class="panel-body" id="taxiBody"></div>
+</section>
+
+<div class="zoom card" id="zoom">
+  <button id="zIn" aria-label="Zoom in" title="Zoom in">+</button>
+  <button id="zOut" aria-label="Zoom out" title="Zoom out">−</button>
+  <button id="zReset" aria-label="Reset view" title="Reset view">⌂</button>
+  <button id="zTime" aria-label="Time of day" title="Time of day">☀</button>
+</div>
+
+<div class="hint" id="hint" hidden></div>
+<div class="info card" id="info" hidden></div>
+
+<footer class="attrib">
+  Map © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> contributors · Basemap © <a href="https://www.esri.com/" target="_blank" rel="noopener">Esri</a>, HERE, Garmin ·
+  Routing <a href="https://project-osrm.org/" target="_blank" rel="noopener">OSRM</a> · Weather Open-Meteo
+</footer>
+
+<noscript><div class="banner">Small LA needs JavaScript.</div></noscript>
+<script src="app.js"></script>
+</body>
+</html>
