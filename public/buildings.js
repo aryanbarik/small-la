@@ -9,8 +9,10 @@
  *
  * API:    window.createBuildingLayer({ ctx, S, screenToWorld, getCamera, getViewport, bounds, worldSize, dpr })
  *           -> { draw(), stats() }
- *         draw() is synchronous and cheap when nothing changed; it kicks off tile fetches for
- *         the visible region on demand and draws whatever is cached.
+ *         draw() is cheap per frame: the extruded geometry is rasterised into an offscreen
+ *         canvas (with a margin around the viewport) and that bitmap is blitted, translated and
+ *         scaled to follow the camera. The bitmap is rebuilt (throttled) when the camera leaves
+ *         its margin / drifts in scale, when tiles arrive, and immediately once the camera rests.
  *
  * World space is the app's z12 pixel space (worldSize = 256 * 2^12).
  */
@@ -18,10 +20,10 @@
   'use strict';
 
   const TILEJSON_URL = 'https://tiles.openfreemap.org/planet';
-    const MAX_CONCURRENT = 6;
-  const MAX_CACHE_TILES = 200;
-  const MAX_TILES_PER_FRAME = 80;     // visible tiles considered (nearest to screen centre first)
-  const MAX_BUILDINGS_PER_FRAME = 14000;
+  const MAX_CONCURRENT = 6;
+  const MAX_CACHE_TILES = 300;
+  const MAX_TILES_PER_FRAME = 160;    // tiles considered per rebuild (nearest to screen centre first)
+  const MAX_BUILDINGS_PER_FRAME = 26000;
   const MIN_M = 1.6;                  // below this zoom the layer is hidden (buildings are sub-pixel)
   const FADE_M = 0.5;                 // fade/grow-in range above MIN_M
   const Z13_UNTIL_M = 3.0;            // z13 tiles below this zoom, z14 above
@@ -264,8 +266,10 @@
   const cache = new Map();   // key -> {state, bld, last, fail, retryAt, ctl}
   let template = null, metaState = 'idle', metaRetryAt = 0, metaFails = 0;
   let inflight = 0;
-  let wanted = [];           // ordered keys for the current frame
-  let dirtyList = true;
+  let wanted = [];           // ordered keys to keep/fetch (current rebuild)
+  let dataVer = 0;           // bumped whenever tile data/meta changes; invalidates the raster cache
+  const decodeQ = [];        // fetched tiles waiting for (time-sliced) MVT decoding
+  let decodeHead = 0;
 
   function loadMeta() {
     if (metaState === 'loading' || metaState === 'ok') return;
@@ -276,7 +280,7 @@
       .then((j) => {
         const t = j && j.tiles && j.tiles[0];
         if (!t) throw new Error('tilejson without tiles');
-        template = t; metaState = 'ok'; metaFails = 0; dirtyList = true;
+        template = t; metaState = 'ok'; metaFails = 0; dataVer++;
       })
       .catch(() => {
         metaState = 'idle'; metaFails++;
@@ -301,8 +305,9 @@
         return r.arrayBuffer();
       })
       .then((buf) => {
-        e.bld = buf && buf.byteLength ? decodeBuildingTile(buf, z, x, y, worldSize) : [];
-        e.state = 'ok'; e.fail = 0; dirtyList = true;
+        if (!buf || !buf.byteLength) { e.bld = []; e.state = 'ok'; e.fail = 0; dataVer++; return; }
+        e.state = 'decoding';
+        decodeQ.push({ e, buf, z, x, y, worldSize });
       })
       .catch(() => {
         e.state = 'error'; e.fail = (e.fail || 0) + 1;
@@ -324,22 +329,53 @@
     }
   }
 
+  // Decode fetched tiles a few ms per frame so tile arrival never causes a long frame.
+  function drainDecode(budgetMs) {
+    const t0 = performance.now();
+    while (decodeHead < decodeQ.length) {
+      const j = decodeQ[decodeHead++];
+      try {
+        j.e.bld = decodeBuildingTile(j.buf, j.z, j.x, j.y, j.worldSize);
+        j.e.state = 'ok'; j.e.fail = 0;
+      } catch (_) {
+        j.e.state = 'error'; j.e.fail = (j.e.fail || 0) + 1;
+        j.e.retryAt = performance.now() + Math.min(RETRY_MAX_MS, RETRY_BASE_MS * 2 ** j.e.fail);
+      }
+      j.buf = null;
+      dataVer++;
+      if (performance.now() - t0 > budgetMs) break;
+    }
+    if (decodeHead >= decodeQ.length) { decodeQ.length = 0; decodeHead = 0; }
+  }
+
   function evict() {
     if (cache.size <= MAX_CACHE_TILES) return;
     const keep = new Set(wanted);
-    const arr = [...cache.entries()].filter(([k, e]) => !keep.has(k) && e.state !== 'loading').sort((a, b) => a[1].last - b[1].last);
+    const arr = [...cache.entries()].filter(([k, e]) => !keep.has(k) && e.state !== 'loading' && e.state !== 'decoding').sort((a, b) => a[1].last - b[1].last);
     for (let i = 0; i < arr.length && cache.size > MAX_CACHE_TILES; i++) cache.delete(arr[i][0]);
   }
 
   /* ---------------- layer ---------------- */
 
   window.createBuildingLayer = function createBuildingLayer(opts) {
-    const { ctx, S, screenToWorld, getCamera, getViewport, bounds, worldSize } = opts;
+    const { S, screenToWorld, getCamera, getViewport, bounds, worldSize } = opts;
+    const mainCtx = opts.ctx;
     const MPP = (40075016.686 / worldSize) * Math.cos((34.05 * Math.PI) / 180);
     pumpWorldSize = worldSize;
 
-    let lastKey = '', frameBld = [];
     let lastStats = { tiles: 0, loaded: 0, buildings: 0, drawn: 0, zoom: 0 };
+
+    // Offscreen raster of the static building layer. Coordinates inside it are CSS px of a
+    // W x H box whose top-left is screen (-offX, -offY) at the moment it was rendered
+    // (camera x,y,m); world point (x,y) sat at (offX + vw/2 + K1(dx-dy), offY + vh/2 + K2(dx+dy)).
+    const cv = document.createElement('canvas');
+    const rc = cv.getContext('2d');
+    const raster = {
+      valid: false, count: 0, x: 0, y: 0, m: 1, K1: 1, K2: 1, offX: 0, offY: 0, W: 0, H: 0,
+      vw: 0, vh: 0, dpr: 1, dataVer: -1, time: 0, reqZ: 0, z: 0, switchStart: 0, renderMs: 30,
+    };
+    let prevCam = { x: NaN, y: NaN, m: NaN };
+    let lastPump = 0;
 
     function viewport() {
       const v = typeof getViewport === 'function' ? getViewport() : getViewport;
@@ -347,9 +383,8 @@
       return { w: v.w ?? v.width ?? v.vw ?? window.innerWidth, h: v.h ?? v.height ?? v.vh ?? window.innerHeight };
     }
 
-    function visibleTiles(z, vw, vh) {
+    function visibleTiles(z, vw, vh, padSide, padTop, padBottom) {
       const tw = worldSize / (1 << z);
-      const padTop = 40, padBottom = 260, padSide = 60; // tall buildings poke into view from below
       const cs = [[-padSide, -padTop], [vw + padSide, -padTop], [vw + padSide, vh + padBottom], [-padSide, vh + padBottom]]
         .map(([x, y]) => screenToWorld(x, y));
       const clampv = (v, a, b) => Math.max(a, Math.min(b, v));
@@ -375,54 +410,87 @@
       return list.map((l) => l[1]);
     }
 
-    function draw() {
-      const cam = getCamera();
+    function releaseRaster() {
+      raster.valid = false; raster.count = 0; raster.dataVer = -1; raster.switchStart = 0;
+      if (cv.width > 1) { cv.width = 1; cv.height = 1; }
+    }
+
+    // Screen-space placement of the raster for the current camera.
+    function placement(cam, vw, vh) {
+      const s = cam.m / raster.m;
+      const sc = Math.abs(s - 1) < 1e-4 ? 1 : s;
+      const ddx = cam.x - raster.x, ddy = cam.y - raster.y;
+      const d0x = raster.K1 * (ddx - ddy), d0y = raster.K2 * (ddx + ddy);
+      return {
+        s, sc, d0x, d0y,
+        dx: vw / 2 - sc * (vw / 2 + raster.offX + d0x),
+        dy: vh / 2 - sc * (vh / 2 + raster.offY + d0y),
+        dw: raster.W * sc, dh: raster.H * sc,
+      };
+    }
+
+    // Render all buildings of the tiles around the current camera into the offscreen raster.
+    function rebuild(now, cam, vw, vh, dpr, desiredZ) {
+      const t0 = performance.now();
       const m = cam.m;
-      if (!(m >= MIN_M)) {
-        if (wanted.length) { wanted = []; frameBld = []; lastKey = ''; }
-        lastStats.drawn = 0;
-        return;
-      }
-      const { w: vw, h: vh } = viewport();
-      const z = m < Z13_UNTIL_M ? 13 : 14;
 
-      loadMeta();
+      // margin around viewport, shrunk if the backing store would get huge
+      let f = 0.25;
+      while (f > 0.05 && vw * (1 + 2 * f) * vh * (1 + 2 * f) * dpr * dpr > 14e6) f -= 0.05;
+      if (f < 0.05) f = 0;
+      const offX = Math.round(vw * f), offY = Math.round(vh * f);
+      const W = vw + 2 * offX, H = vh + 2 * offY;
+      const pw = Math.max(1, Math.round(W * dpr)), ph = Math.max(1, Math.round(H * dpr));
+      if (cv.width !== pw || cv.height !== ph) { cv.width = pw; cv.height = ph; }
+      else rc.setTransform(1, 0, 0, 1, 0, 0), rc.clearRect(0, 0, pw, ph);
+      rc.setTransform(pw / W, 0, 0, ph / H, 0, 0);
 
-      const key = `${z}|${Math.round(cam.x * 4)}|${Math.round(cam.y * 4)}|${Math.round(m * 200)}|${vw}x${vh}`;
-      if (key !== lastKey || dirtyList) {
-        lastKey = key; dirtyList = false;
-        wanted = visibleTiles(z, vw, vh);
-        pump();
-        evict();
-        const now = performance.now();
-        frameBld = [];
-        let loaded = 0;
-        for (const k of wanted) {
-          const e = cache.get(k);
-          if (!e) continue;
-          e.last = now;
-          if (e.state === 'ok') { loaded++; for (const b of e.bld) frameBld.push(b); }
+      // tiles: switch zoom level only once the new level is mostly loaded (no pop-to-empty)
+      const padSide = offX + 60, padTop = offY + 40, padBottom = offY + 260;
+      let z = raster.valid ? raster.z : desiredZ;
+      const desiredList = visibleTiles(desiredZ, vw, vh, padSide, padTop, padBottom);
+      let renderList = desiredList;
+      wanted = desiredList;
+      if (z !== desiredZ) {
+        if (!raster.switchStart) raster.switchStart = now;
+        let ready = 0;
+        for (const k of desiredList) { const e = cache.get(k); if (e && e.state === 'ok') ready++; }
+        if (metaState !== 'ok' || ready >= desiredList.length * 0.7 || now - raster.switchStart > 2500) {
+          z = desiredZ; raster.switchStart = 0;
+        } else {
+          renderList = visibleTiles(z, vw, vh, padSide, padTop, padBottom);
+          wanted = desiredList.concat(renderList);
         }
-        lastStats = { tiles: wanted.length, loaded, buildings: frameBld.length, drawn: 0, zoom: z };
-        // far -> near (screen y grows with x + y)
-        frameBld.sort((a, b) => a.key - b.key);
+      } else raster.switchStart = 0;
+      pump(); lastPump = now;
+      evict();
+
+      const frameBld = [];
+      let loaded = 0;
+      for (const k of renderList) {
+        const e = cache.get(k);
+        if (!e) continue;
+        e.last = now;
+        if (e.state === 'ok') { loaded++; for (const b of e.bld) frameBld.push(b); }
       }
-      if (!frameBld.length) return;
+      for (const k of desiredList) { const e = cache.get(k); if (e) e.last = now; }
+      // far -> near (screen y grows with x + y)
+      frameBld.sort((a, b) => a.key - b.key);
 
       // projection coefficients taken from S so we stay in sync with the app camera
       const cx = cam.x, cy = cam.y;
       const o = S(cx, cy, 0), ex = S(cx + 1, cy, 0);
       const K1 = ex[0] - o[0], K2 = ex[1] - o[1];
-      const ox = o[0], oy = o[1];
+      const ox = o[0] + offX, oy = o[1] + offY;
 
       const grow = Math.min(1, (m - MIN_M) / FADE_M);
       const hs = (m / MPP) * 0.85 * HEIGHT_EXAGG * (0.25 + 0.75 * grow);
       const minPx = m < 2.4 ? 3 : m < 4 ? 2 : 1.2;
       const detail = m >= 3.2;
-      const vwp = vw + 40, vhp = vh + 40;
+      const vwp = W + 20, vhp = H + 20;
 
+      const ctx = rc;
       ctx.save();
-      ctx.globalAlpha *= Math.min(1, 0.15 + grow);
       ctx.lineJoin = 'round';
 
       // pre-cull
@@ -436,7 +504,7 @@
         if ((bx - ax) + (botY - topY) < minPx * 2.2 && b.h * hs < minPx) continue;
         vis.push(b);
       }
-      // Keep detail distributed across the viewport instead of filling the budget
+      // Keep detail distributed across the area instead of filling the budget
       // with the farthest (topmost) buildings first.
       if (vis.length > MAX_BUILDINGS_PER_FRAME) {
         const step = vis.length / MAX_BUILDINGS_PER_FRAME;
@@ -503,8 +571,8 @@
               ctx.strokeStyle = pal.glass ? 'rgba(210,235,250,0.32)' : pal.line;
               ctx.lineWidth = pal.glass ? 0.9 : 0.5;
               ctx.beginPath();
-              for (let f = 1; f < floors; f++) {
-                const yy = (wallH * f) / floors;
+              for (let f2 = 1; f2 < floors; f2++) {
+                const yy = (wallH * f2) / floors;
                 ctx.moveTo(pax, pay - h0 - yy); ctx.lineTo(pbx, pby - h0 - yy);
               }
               ctx.stroke();
@@ -539,7 +607,68 @@
         }
       }
       ctx.restore();
-      lastStats.drawn = drawn;
+
+      Object.assign(raster, {
+        valid: true, count: drawn, x: cx, y: cy, m, K1, K2, offX, offY, W, H, vw, vh, dpr,
+        dataVer, time: now, reqZ: desiredZ, z,
+      });
+      raster.renderMs = performance.now() - t0;
+      lastStats = { tiles: renderList.length, loaded, buildings: frameBld.length, drawn, zoom: z };
+    }
+
+    function draw() {
+      drainDecode(5);
+      const cam = getCamera();
+      const m = cam.m;
+      if (!(m >= MIN_M)) {
+        if (wanted.length || raster.valid) { wanted = []; releaseRaster(); }
+        lastStats.drawn = 0;
+        prevCam = { x: NaN, y: NaN, m: NaN };
+        return;
+      }
+      const { w: vw, h: vh } = viewport();
+      const dpr = mainCtx.getTransform().a || 1;
+      const desiredZ = m < Z13_UNTIL_M ? 13 : 14;
+      const now = performance.now();
+
+      loadMeta();
+      if (now - lastPump > 1000) { lastPump = now; pump(); } // retry failed tiles while the camera rests
+
+      // is the camera at rest (same place as the previous frame)?
+      const k1 = 0.7071 * m, k2 = 0.35355 * m;
+      const ddx = cam.x - prevCam.x, ddy = cam.y - prevCam.y;
+      const rest = Math.max(Math.abs(k1 * (ddx - ddy)), Math.abs(k2 * (ddx + ddy))) < 0.25 && Math.abs(m / prevCam.m - 1) < 2e-4;
+      prevCam.x = cam.x; prevCam.y = cam.y; prevCam.m = m;
+
+      let doRebuild = false;
+      if (!raster.valid || raster.vw !== vw || raster.vh !== vh || raster.dpr !== dpr) {
+        doRebuild = true;
+      } else {
+        const p = placement(cam, vw, vh);
+        const since = now - raster.time;
+        const covered = p.dx <= 0.5 && p.dy <= 0.5 && p.dx + p.dw >= vw - 0.5 && p.dy + p.dh >= vh - 0.5;
+        const scaleOff = Math.abs(p.s - 1);
+        const motionNeeds = !covered || scaleOff > 0.08 || desiredZ !== raster.reqZ;
+        const restNeeds = scaleOff > 1e-4 || Math.hypot(p.d0x, p.d0y) * p.sc > 0.35;
+        const dataNeeds = dataVer !== raster.dataVer || (raster.switchStart && now - raster.switchStart > 2500);
+        const interval = Math.max(120, Math.min(600, raster.renderMs * 2.5));
+        const dataInterval = Math.max(250, raster.renderMs * 3);
+        if (rest && (motionNeeds || restNeeds)) doRebuild = true;
+        else if (motionNeeds && since >= interval) doRebuild = true;
+        else if (dataNeeds && since >= dataInterval) doRebuild = true;
+      }
+      if (doRebuild) rebuild(now, cam, vw, vh, dpr, desiredZ);
+      if (!raster.valid || !raster.count) return;
+
+      const p = placement(cam, vw, vh);
+      const grow = Math.min(1, (m - MIN_M) / FADE_M);
+      let dx = p.dx, dy = p.dy;
+      if (p.sc === 1) { dx = Math.round(dx * dpr) / dpr; dy = Math.round(dy * dpr) / dpr; }
+      mainCtx.save();
+      mainCtx.globalAlpha *= Math.min(1, 0.15 + grow);
+      mainCtx.imageSmoothingEnabled = true;
+      mainCtx.drawImage(cv, dx, dy, p.dw, p.dh);
+      mainCtx.restore();
     }
 
     return { draw, stats: () => ({ ...lastStats, inflight, cached: cache.size, meta: metaState }) };

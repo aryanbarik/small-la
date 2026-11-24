@@ -2,6 +2,10 @@
 
 A miniature Los Angeles browser map with live buses, aircraft, vessels and weather.
 
+Inspired by [Small SF](https://smallsf.com/) by [Ari Dutilh](https://dutilh.net/),
+itself inspired by [Isometric Seattle](https://isometricseattle.fun/) by Dylan
+Martin. Small LA is an independent project and does not use Small SF's artwork.
+
 Explore the map by dragging and zooming. Toggle the layers to show live vehicles,
 illustrated landmarks, and simulated traffic. The robotaxi panel lets you request a
 simulated ride between landmarks or points on the map; it uses public OSRM road
